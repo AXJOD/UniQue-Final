@@ -27,7 +27,8 @@ check_role('admin')
 # Initialize services
 @st.cache_resource
 def init_services():
-    return Database(), AnalyticsService()
+    db = Database()
+    return db, AnalyticsService(db)
 
 db, analytics = init_services()
 

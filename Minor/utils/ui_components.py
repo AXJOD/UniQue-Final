@@ -6,6 +6,7 @@ import streamlit as st
 import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime
+from typing import List, Dict
 
 def render_metric_card(title, value, delta=None, icon="📊"):
     """Render a metric card"""
@@ -64,7 +65,7 @@ def render_chat_message(message, is_user=True):
         """, unsafe_allow_html=True)
     else:
         st.markdown(f"""
-        <div style="background-color: #f0f2f6; padding: 1rem; border-radius: 15px; margin: 0.5rem 0; margin-right: 20%;">
+        <div style="background-color: #f0f2f6; color: #000000; padding: 1rem; border-radius: 15px; margin: 0.5rem 0; margin-right: 20%;">
             <strong>🤖 AI Assistant:</strong><br>{message}
         </div>
         """, unsafe_allow_html=True)
@@ -114,7 +115,7 @@ def render_error_message(message):
 def render_info_box(title, content, icon="ℹ️"):
     """Render an info box"""
     st.markdown(f"""
-    <div style="background-color: #e3f2fd; border-left: 4px solid #2196f3; padding: 1rem; border-radius: 5px; margin: 1rem 0;">
+    <div style="background-color: #e9eafc; border-left: 4px solid #667eea; padding: 1rem; border-radius: 5px; margin: 1rem 0; color: #000000;">
         <div style="font-size: 1.5rem;">{icon} <strong>{title}</strong></div>
         <div style="margin-top: 0.5rem;">{content}</div>
     </div>
@@ -122,7 +123,7 @@ def render_info_box(title, content, icon="ℹ️"):
 
 def render_question_card(question, index):
     """Render a generated question card"""
-    with st.expander(f"Question {index + 1}: {question.get('type', 'Question').title()}", expanded=False):
+    with st.expander(f"Question {index + 1}: {question.get('type', 'Question').title()}", expanded=True):
         st.markdown(f"**Question:** {question['question']}")
         
         if 'options' in question:
@@ -133,12 +134,12 @@ def render_question_card(question, index):
         
         if 'marking_scheme' in question:
             st.info(f"**Marks:** {question.get('marks', 'N/A')}")
-            with st.expander("View Marking Scheme"):
-                st.markdown(question['marking_scheme'])
+            st.markdown("**Marking Scheme:**")
+            st.markdown(question['marking_scheme'])
         
         if 'explanation' in question:
-            with st.expander("View Explanation"):
-                st.markdown(question['explanation'])
+            st.markdown("**Explanation:**")
+            st.markdown(question['explanation'])
 
 def check_authentication():
     """Check if user is authenticated, redirect if not"""
@@ -151,3 +152,43 @@ def check_role(required_role):
     if st.session_state.get('user_role') != required_role:
         st.error(f"⛔ This page is only accessible to {required_role}s")
         st.stop()
+
+def format_questions_for_txt(questions: List[Dict], content_type: str) -> str:
+    """Formats a list of generated questions into a human-readable string for TXT download."""
+    output = [f"Generated {content_type.upper()} Questions"]
+    output.append(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    output.append("=" * 40)
+    
+    for q in questions:
+        output.append(f"\nQuestion {q.get('question_number', '')}: {q.get('question', 'N/A')}")
+        
+        if 'type' in q:
+            output.append(f"Type: {q['type'].title()}")
+        if 'marks' in q:
+            output.append(f"Marks: {q['marks']}")
+        
+        if 'options' in q and isinstance(q['options'], dict):
+            output.append("\nOptions:")
+            for key, value in q['options'].items():
+                output.append(f"  {key}) {value}")
+        
+        if 'correct_answer' in q:
+            output.append(f"\nCorrect Answer: {q['correct_answer']}")
+        
+        if 'explanation' in q:
+            output.append(f"Explanation: {q['explanation']}")
+            
+        if 'marking_scheme' in q:
+            output.append(f"Marking Scheme: {q['marking_scheme']}")
+            
+        if 'sample_answer' in q:
+            output.append(f"Sample Answer: {q['sample_answer']}")
+            
+        if 'key_points' in q and isinstance(q['key_points'], list):
+            output.append("Key Points for Answer:")
+            for point in q['key_points']:
+                output.append(f"  - {point}")
+
+        output.append("-" * 40)
+        
+    return "\n".join(output)

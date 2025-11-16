@@ -6,6 +6,7 @@ Main entry point with authentication
 import streamlit as st
 from dotenv import load_dotenv
 import os
+import asyncio
 
 # Load environment variables
 load_dotenv()
@@ -268,9 +269,9 @@ def main():
         show_landing_page()
 
 if __name__ == "__main__":
-    # Verify HuggingFace token
-    if not os.getenv("HUGGINGFACEHUB_API_TOKEN"):
-        st.error("⚠️ HUGGINGFACEHUB_API_TOKEN not found in .env file!")
+    # Verify Groq API key
+    if not os.getenv("GROQ_API_KEY"):
+        st.error("⚠️ GROQ_API_KEY not found in .env file!")
         st.stop()
     
     main()

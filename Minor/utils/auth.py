@@ -16,8 +16,9 @@ def verify_password(password: str, hashed: str) -> bool:
     return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
 
 def create_user(username: str, password: str, role: str, email: str = None) -> bool:
-    """Create a new user"""
+    """Create a new user - returns True if successful"""
     try:
+        # Database.create_user now handles password hashing internally
         user_id = db.create_user(username, password, role, email)
         return user_id is not None
     except Exception as e:

@@ -2,15 +2,20 @@
 RAG Engine Service
 Handles retrieval-augmented generation for student queries
 """
-
-from langchain_community.vectorstores import Chroma
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_huggingface import HuggingFaceEndpoint
-from langchain.chains import RetrievalQA
-from langchain.prompts import PromptTemplate
-from typing import Dict, List
 import os
 import logging
+from typing import Dict, List, Any
+
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.output_parsers import StrOutputParser
+from langchain_chroma import Chroma
+from langchain_community.chat_message_histories import ChatMessageHistory
+from langchain_core.chat_history import BaseChatMessageHistory
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.runnables.history import RunnableWithMessageHistory
+from langchain_groq import ChatGroq
+from langchain_huggingface import HuggingFaceEmbeddings
+
 from config import CHROMA_DB_DIR
 
 logging.basicConfig(level=logging.INFO)
@@ -20,12 +25,14 @@ class RAGEngine:
     def __init__(self):
         self.chroma_path = CHROMA_DB_DIR
         self.embedding_model = "sentence-transformers/all-MiniLM-L6-v2"
-        self.llm_model = "mistralai/Mistral-7B-Instruct-v0.2"
         
         self.embeddings = self._initialize_embeddings()
         self.vectorstore = self._initialize_vectorstore()
         self.llm = self._initialize_llm()
         
+        self.store = {}  # To store chat histories for different sessions
+        self.conversational_rag_chain = self._create_conversational_rag_chain()
+
     def _initialize_embeddings(self):
         """Initialize embeddings model"""
         return HuggingFaceEmbeddings(
@@ -33,7 +40,7 @@ class RAGEngine:
             model_kwargs={'device': 'cpu'},
             encode_kwargs={'normalize_embeddings': True}
         )
-    
+
     def _initialize_vectorstore(self):
         """Initialize ChromaDB connection"""
         return Chroma(
@@ -41,67 +48,103 @@ class RAGEngine:
             embedding_function=self.embeddings,
             persist_directory=self.chroma_path
         )
-    
+
     def _initialize_llm(self):
-        """Initialize HuggingFace LLM"""
-        api_token = os.getenv("HUGGINGFACEHUB_API_TOKEN")
-        if not api_token:
-            raise ValueError("HUGGINGFACEHUB_API_TOKEN not found in environment")
+        """Initialize Groq LLM"""
+        api_key = os.getenv("GROQ_API_KEY")
+        if not api_key:
+            raise ValueError("GROQ_API_KEY not found in environment")
         
-        return HuggingFaceEndpoint(
-            repo_id=self.llm_model,
-            temperature=0.3,
-            max_new_tokens=1024,
-            huggingfacehub_api_token=api_token
-        )
-    
-    def answer_query(self, query: str) -> Dict:
+        return ChatGroq(groq_api_key=api_key, model_name="openai/gpt-oss-120b")
+
+    def _create_conversational_rag_chain(self):
         """
-        Answer student query using RAG
-        Standard Q&A mode
+        Creates the conversational RAG chain manually using LCEL.
+        This version ensures the output is a dictionary containing 'answer' and 'context'.
+        """
+        retriever = self.vectorstore.as_retriever()
+
+        # 1. Prompt and chain to reformulate the question based on history
+        contextualize_q_system_prompt = (
+            "Given a chat history and the latest user question "
+            "which might reference context in the chat history, "
+            "formulate a standalone question which can be understood "
+            "without the chat history. Do NOT answer the question, "
+            "just reformulate it if needed and otherwise return it as is."
+        )
+        contextualize_q_prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", contextualize_q_system_prompt),
+                MessagesPlaceholder("chat_history"),
+                ("human", "{input}"),
+            ]
+        )
+        history_aware_query_chain = contextualize_q_prompt | self.llm | StrOutputParser()
+
+        # 2. Prompt and chain for answering the question
+        system_prompt = (
+            "You are an assistant for question-answering tasks. "
+            "Use the following pieces of retrieved context to answer "
+            "the question. If you don't know the answer, say that you "
+            "don't know. Use three sentences maximum and keep the "
+            "answer concise."
+            "\n\n"
+            "{context}"
+        )
+        qa_prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", system_prompt),
+                MessagesPlaceholder("chat_history"),
+                ("human", "{input}"),
+            ]
+        )
+        question_answer_chain = qa_prompt | self.llm | StrOutputParser()
+
+        # 3. Chain to retrieve documents
+        def get_docs(input_dict):
+            query = history_aware_query_chain.invoke(input_dict)
+            return retriever.invoke(query)
+
+        # 4. Manually construct the full chain to return a dictionary
+        rag_chain = (
+            RunnablePassthrough.assign(context=get_docs)
+            .assign(answer=question_answer_chain)
+        )
+        
+        # 5. Wrap with history management
+        return RunnableWithMessageHistory(
+            rag_chain,
+            self.get_session_history,
+            input_messages_key="input",
+            history_messages_key="chat_history",
+            output_messages_key="answer",
+        )
+
+    def get_session_history(self, session_id: str) -> BaseChatMessageHistory:
+        """Get chat history for a session"""
+        if session_id not in self.store:
+            self.store[session_id] = ChatMessageHistory()
+        return self.store[session_id]
+
+    async def answer_query(self, query: str, session_id: str) -> Dict:
+        """
+        Answer student query using conversational RAG.
         """
         try:
-            # Create retriever
-            retriever = self.vectorstore.as_retriever(
-                search_type="similarity",
-                search_kwargs={"k": 5}
+            response_dict = self.conversational_rag_chain.invoke(
+                {"input": query},
+                config={"configurable": {"session_id": session_id}},
             )
-            
-            # Define prompt template
-            prompt_template = """Use the following context to answer the question. 
-If you don't know the answer based on the context, say so clearly.
 
-Context: {context}
+            sources = []
+            if 'context' in response_dict and response_dict['context']:
+                sources = list(set([
+                    doc.metadata.get("source", "Unknown")
+                    for doc in response_dict['context']
+                ]))
 
-Question: {question}
-
-Answer: Provide a clear, concise answer with examples where appropriate."""
-
-            PROMPT = PromptTemplate(
-                template=prompt_template,
-                input_variables=["context", "question"]
-            )
-            
-            # Create QA chain
-            qa_chain = RetrievalQA.from_chain_type(
-                llm=self.llm,
-                chain_type="stuff",
-                retriever=retriever,
-                return_source_documents=True,
-                chain_type_kwargs={"prompt": PROMPT}
-            )
-            
-            # Get answer
-            result = qa_chain({"query": query})
-            
-            # Extract sources
-            sources = list(set([
-                doc.metadata.get("source", "Unknown")
-                for doc in result["source_documents"]
-            ]))
-            
             return {
-                "answer": result["result"],
+                "answer": response_dict.get("answer", "Sorry, I encountered an issue and couldn't find an answer."),
                 "sources": sources,
                 "mode": "qa"
             }
@@ -109,174 +152,59 @@ Answer: Provide a clear, concise answer with examples where appropriate."""
         except Exception as e:
             logger.error(f"Error in answer_query: {str(e)}")
             raise
-    
-    def generate_study_notes(self, topic: str) -> Dict:
-        """
-        Generate comprehensive study notes on a topic
-        Enhanced formatting with structure
-        """
-        try:
-            retriever = self.vectorstore.as_retriever(
-                search_type="similarity",
-                search_kwargs={"k": 7}
-            )
-            
-            prompt_template = """Using the provided context, create detailed study notes on: {question}
 
-Format your response as follows:
-
-**KEY CONCEPTS:**
-• [List main concepts with brief definitions]
-
-**DETAILED EXPLANATION:**
-[Provide comprehensive explanation with examples]
-
-**IMPORTANT POINTS TO REMEMBER:**
-• [Highlight critical information]
-
-**PRACTICE QUESTIONS:**
-1. [Conceptual question with answer]
-2. [Application question with answer]
-3. [Analysis question with answer]
-
-Context: {context}
-
-Generate comprehensive study notes now:"""
-
-            PROMPT = PromptTemplate(
-                template=prompt_template,
-                input_variables=["context", "question"]
-            )
-            
-            qa_chain = RetrievalQA.from_chain_type(
-                llm=self.llm,
-                chain_type="stuff",
-                retriever=retriever,
-                return_source_documents=True,
-                chain_type_kwargs={"prompt": PROMPT}
-            )
-            
-            result = qa_chain({"query": topic})
-            
-            sources = list(set([
-                doc.metadata.get("source", "Unknown")
-                for doc in result["source_documents"]
-            ]))
-            
-            return {
-                "answer": result["result"],
-                "sources": sources,
-                "mode": "notes"
-            }
-            
-        except Exception as e:
-            logger.error(f"Error in generate_study_notes: {str(e)}")
-            raise
-    
-    def generate_practice_questions(self, topic: str) -> Dict:
-        """
-        Generate practice questions with answers
-        Multiple formats: MCQ, Short Answer, Conceptual
-        """
-        try:
-            retriever = self.vectorstore.as_retriever(
-                search_type="similarity",
-                search_kwargs={"k": 6}
-            )
-            
-            prompt_template = """Based on the context provided, generate practice questions about: {question}
-
-Create a mix of question types:
-
-**MULTIPLE CHOICE QUESTIONS (3 questions):**
-[Each with 4 options and correct answer marked]
-
-**SHORT ANSWER QUESTIONS (3 questions):**
-[With brief model answers]
-
-**CONCEPTUAL QUESTIONS (2 questions):**
-[Deeper understanding questions with detailed answers]
-
-Context: {context}
-
-Generate the practice questions now:"""
-
-            PROMPT = PromptTemplate(
-                template=prompt_template,
-                input_variables=["context", "question"]
-            )
-            
-            qa_chain = RetrievalQA.from_chain_type(
-                llm=self.llm,
-                chain_type="stuff",
-                retriever=retriever,
-                return_source_documents=True,
-                chain_type_kwargs={"prompt": PROMPT}
-            )
-            
-            result = qa_chain({"query": topic})
-            
-            sources = list(set([
-                doc.metadata.get("source", "Unknown")
-                for doc in result["source_documents"]
-            ]))
-            
-            return {
-                "answer": result["result"],
-                "sources": sources,
-                "mode": "practice"
-            }
-            
-        except Exception as e:
-            logger.error(f"Error in generate_practice_questions: {str(e)}")
-            raise
-    
     def get_documents_context(self, document_ids: List[str]) -> str:
         """
-        Retrieve concatenated context from specific documents
-        Used by faculty tools for content generation
+        Retrieve concatenated context from specific documents.
+        This implementation fetches all data and filters in Python to ensure robustness.
         """
         try:
             all_chunks = []
+            # Fetch all data from the collection
+            all_data = self.vectorstore._collection.get(include=["metadatas", "documents"])
             
-            for doc_id in document_ids:
-                results = self.vectorstore.get(
-                    where={"document_id": doc_id},
-                    include=["documents"]
-                )
-                
-                if results and results['documents']:
-                    all_chunks.extend(results['documents'])
+            if not all_data['documents']:
+                logger.warning("Vector store returned no documents.")
+                return ""
+
+            # Filter in Python
+            for i, metadata in enumerate(all_data['metadatas']):
+                if metadata and metadata.get('doc_id') in document_ids:
+                    all_chunks.append(all_data['documents'][i])
             
+            if not all_chunks:
+                logger.warning(f"No chunks found for document IDs: {document_ids}. Total items checked: {len(all_data['documents'])}")
+
             # Concatenate and limit to reasonable size
-            context = "\n\n".join(all_chunks[:20])  # Limit to 20 chunks
+            context = "\n\n".join(all_chunks[:20])
             return context
             
         except Exception as e:
             logger.error(f"Error retrieving documents context: {str(e)}")
             return ""
-    
+
     def check_vectorstore(self) -> str:
         """Health check for vector store"""
         try:
             count = self.vectorstore._collection.count()
             return f"operational ({count} chunks)"
-        except:
+        except Exception as e:
+            logger.error(f"Vectorstore check failed: {e}")
             return "unavailable"
-    
+
     def check_llm(self) -> str:
         """Health check for LLM"""
         try:
-            # Simple test query
-            test = self.llm.invoke("Hello")
+            self.llm.invoke("Hello")
             return "operational"
-        except:
+        except Exception as e:
+            logger.error(f"LLM check failed: {e}")
             return "unavailable"
-    
+
     def delete_document(self, doc_id: str):
         """Delete document from vector store"""
         try:
-            results = self.vectorstore.get(where={"document_id": doc_id})
+            results = self.vectorstore.get(where={"doc_id": doc_id})
             if results and results['ids']:
                 self.vectorstore.delete(ids=results['ids'])
                 logger.info(f"Deleted vectors for document {doc_id}")

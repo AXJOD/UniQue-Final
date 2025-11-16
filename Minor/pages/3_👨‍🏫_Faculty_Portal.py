@@ -8,14 +8,18 @@ import time
 from datetime import datetime
 from utils.ui_components import (
     check_authentication, render_document_card,
-    render_question_card, render_progress_bar, render_info_box
+    render_question_card, render_progress_bar, render_info_box,
+    format_questions_for_txt
 )
 from services.document_processor import DocumentProcessor
 from services.question_generator import QuestionGenerator
 from services.rag_engine import RAGEngine
 from services.database import Database
 from services.analytics import AnalyticsService
-from config import UPLOADS_DIR
+import os
+import uuid
+import json
+import pandas as pd
 
 # Page config
 st.set_page_config(
@@ -30,15 +34,32 @@ check_authentication()
 # Initialize services
 @st.cache_resource
 def init_services():
+    db = Database()
     return (
         DocumentProcessor(),
         QuestionGenerator(),
         RAGEngine(),
-        Database(),
-        AnalyticsService()
+        db,
+        AnalyticsService(db)
     )
 
 doc_processor, question_gen, rag_engine, db, analytics = init_services()
+
+# Async helper function for Streamlit context
+@st.cache_resource
+def get_event_loop():
+    """Get or create event loop for async operations"""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop
+
+def run_async(coro):
+    """Helper to run async functions in Streamlit"""
+    loop = get_event_loop()
+    return loop.run_until_complete(coro)
 
 # Page header
 st.markdown("# 👨‍🏫 Faculty Portal")
@@ -88,12 +109,8 @@ with tab1:
         if uploaded_file and course_name:
             with st.spinner("📤 Uploading and processing document..."):
                 try:
-                    # Save uploaded file
-                    import os
-                    import uuid
-                    
                     doc_id = str(uuid.uuid4())
-                    upload_dir = UPLOADS_DIR
+                    upload_dir = "data/uploads"
                     os.makedirs(upload_dir, exist_ok=True)
                     
                     file_path = os.path.join(upload_dir, f"{doc_id}_{uploaded_file.name}")
@@ -111,19 +128,19 @@ with tab1:
                         status="processing"
                     )
                     
-                    # Process document
+                    # Process document asynchronously
                     progress_bar = st.progress(0)
                     status_text = st.empty()
                     
                     status_text.text("📄 Extracting text from PDF...")
                     progress_bar.progress(25)
                     
-                    result = asyncio.run(doc_processor.process_pdf(
+                    result = doc_processor.process_pdf(
                         file_path=file_path,
                         doc_id=doc_id,
                         filename=uploaded_file.name,
                         uploaded_by=st.session_state.user_id
-                    ))
+                    )
                     
                     status_text.text("✂️ Splitting into chunks...")
                     progress_bar.progress(50)
@@ -248,27 +265,21 @@ with tab3:
                 num_questions = st.slider("Number of questions:", 1, 20, 5)
             
             with col2:
-                if "MCQ" not in gen_type:
-                    difficulty = st.select_slider(
-                        "Difficulty level:",
-                        options=["easy", "medium", "hard"]
-                    )
-                else:
-                    difficulty = st.select_slider(
-                        "Difficulty level:",
-                        options=["easy", "medium", "hard"]
-                    )
+                difficulty = st.select_slider(
+                    "Difficulty level:",
+                    options=["easy", "medium", "hard"]
+                )
             
             # Generate button
             if st.button("🎯 Generate Content", type="primary", use_container_width=True):
                 with st.spinner("🤖 AI is generating content..."):
                     try:
                         # Get context from selected documents
-                        context = asyncio.run(rag_engine.get_documents_context(selected_docs))
+                        context = rag_engine.get_documents_context(selected_docs)
                         
                         # Generate based on type
                         if "Assignment" in gen_type:
-                            questions = asyncio.run(question_gen.generate_assignment(
+                            questions = run_async(question_gen.generate_assignment(
                                 context=context,
                                 num_questions=num_questions,
                                 difficulty=difficulty
@@ -276,7 +287,7 @@ with tab3:
                             content_type = "assignment"
                         
                         elif "MCQ" in gen_type:
-                            questions = asyncio.run(question_gen.generate_mcqs(
+                            questions = run_async(question_gen.generate_mcqs(
                                 context=context,
                                 num_questions=num_questions,
                                 difficulty=difficulty
@@ -284,14 +295,13 @@ with tab3:
                             content_type = "mcq"
                         
                         else:  # Viva
-                            questions = asyncio.run(question_gen.generate_viva_questions(
+                            questions = run_async(question_gen.generate_viva_questions(
                                 context=context,
                                 num_questions=num_questions
                             ))
                             content_type = "viva"
                         
                         # Store generated content
-                        import uuid
                         content_id = str(uuid.uuid4())
                         
                         db.store_generated_content(
@@ -318,14 +328,13 @@ with tab3:
                             render_question_card(question, i)
                         
                         # Download option
-                        import json
-                        questions_json = json.dumps(questions, indent=2)
+                        questions_txt = format_questions_for_txt(questions, content_type)
                         
                         st.download_button(
-                            "📥 Download Questions (JSON)",
-                            questions_json,
-                            file_name=f"{content_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                            mime="application/json"
+                            "📥 Download Questions (.txt)",
+                            questions_txt,
+                            file_name=f"{content_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                            mime="text/plain"
                         )
                         
                     except Exception as e:
@@ -354,7 +363,6 @@ with tab4:
         if stats['content_generated']:
             st.markdown("### 📈 Generated Content Breakdown")
             
-            import pandas as pd
             df = pd.DataFrame([
                 {"Type": k.upper(), "Count": v}
                 for k, v in stats['content_generated'].items()

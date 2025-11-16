@@ -6,7 +6,7 @@ Handles PDF extraction, text chunking, embedding, and storage.
 import os
 from typing import Dict, Any, List
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_huggingface.embeddings import HuggingFaceEmbeddings
+from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 from pypdf import PdfReader
 from config import CHROMA_DB_DIR
@@ -14,7 +14,7 @@ from config import CHROMA_DB_DIR
 class DocumentProcessor:
     def __init__(self):
         # Define embeddings model (you can replace with OpenAIEmbeddings or others)
-        self.embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+        self.embedding_model = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
         self.vectorstore_path = CHROMA_DB_DIR # Updated path to match config.py
 
     def process_pdf(self, file_path: str, doc_id: str, filename: str, uploaded_by: str) -> Dict[str, Any]:
@@ -40,8 +40,7 @@ class DocumentProcessor:
             persist_directory=self.vectorstore_path,
             collection_name="faculty_documents" # Use doc_id as collection name for isolation
         )
-        vectorstore.persist()
-
+        
         # Return summary info
         return {
             "document_id": doc_id,
