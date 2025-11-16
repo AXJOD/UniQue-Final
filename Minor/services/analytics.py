@@ -7,15 +7,14 @@ from typing import Dict, List
 from datetime import datetime, timedelta
 import os
 import logging
+from services.database import Database
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class AnalyticsService:
-    def __init__(self):
-        # Import here to avoid circular import
-        from services.database import Database
-        self.db = Database()
+    def __init__(self, db: Database): # <-- Receive the db instance
+        self.db = db
     
     # ==================== Logging Methods ====================
     

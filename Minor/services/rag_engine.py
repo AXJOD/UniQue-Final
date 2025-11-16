@@ -55,7 +55,7 @@ class RAGEngine:
             huggingfacehub_api_token=api_token
         )
     
-    async def answer_query(self, query: str) -> Dict:
+    def answer_query(self, query: str) -> Dict:
         """
         Answer student query using RAG
         Standard Q&A mode
@@ -110,7 +110,7 @@ Answer: Provide a clear, concise answer with examples where appropriate."""
             logger.error(f"Error in answer_query: {str(e)}")
             raise
     
-    async def generate_study_notes(self, topic: str) -> Dict:
+    def generate_study_notes(self, topic: str) -> Dict:
         """
         Generate comprehensive study notes on a topic
         Enhanced formatting with structure
@@ -173,7 +173,7 @@ Generate comprehensive study notes now:"""
             logger.error(f"Error in generate_study_notes: {str(e)}")
             raise
     
-    async def generate_practice_questions(self, topic: str) -> Dict:
+    def generate_practice_questions(self, topic: str) -> Dict:
         """
         Generate practice questions with answers
         Multiple formats: MCQ, Short Answer, Conceptual
@@ -231,7 +231,7 @@ Generate the practice questions now:"""
             logger.error(f"Error in generate_practice_questions: {str(e)}")
             raise
     
-    async def get_documents_context(self, document_ids: List[str]) -> str:
+    def get_documents_context(self, document_ids: List[str]) -> str:
         """
         Retrieve concatenated context from specific documents
         Used by faculty tools for content generation
